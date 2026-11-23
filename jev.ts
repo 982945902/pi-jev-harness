@@ -113,6 +113,10 @@ export const KINDS: Record<string, string> = {
 	unclear: 'Too vague or ambiguous to act on; the model should ask one question first'
 }
 
+export const delegateQuestion = noul(
+	'Should a separate read-only agent investigate this request before the main model answers? Give a high probability only for a self-contained question about the current project that needs multiple searches or reads across files to gather evidence. Give a low probability for simple lookups, general questions, requests that depend on conversation history, edits, shell or external actions, and requests that explicitly mention delegation.'
+)
+
 export function routingQuestions(toolNames: string[]): Record<string, Question> {
 	const questions: Record<string, Question> = {
 		kind: choice("What kind of turn is the user's `prompt` asking for?", KINDS)
@@ -183,6 +187,7 @@ export const guardQuestions: Record<string, Question> = {
 
 export const THRESHOLDS = {
 	toolNeeded: 0.35, // keep a tool if Jev gives it at least this much
+	delegateWorthwhile: 0.65,
 	prefetchFile: 0.6, // read a candidate file at or above this
 	dropResult: 0.3, // drop a result when relevance is below this and keep says drop
 	stuck: 0.7,

@@ -38,12 +38,21 @@ The footer shows the last Jev verdict. Every Jev call is logged with its answers
 Set `delegateModel` to an exact `provider/model` from `omp models`. Use a model
 that supports native tool calls or a gateway routing group such as
 `magpie/group/jev-delegate`. For a single run, set `PI_JEV_DELEGATE_MODEL` instead.
-The setting enables `jev_delegate` in omp. In `on` mode the main model can send
-a focused question to the delegate, which runs an in-memory session in the same
-project and returns its findings. The delegate can use the caller's enabled
-`read`, `grep` and `glob` tools for up to 30 seconds. It uses the configured omp
-provider credentials. Successful runs log the delegate model, duration and tool
-names in `~/.jev-harness/log.jsonl`.
+In `on` mode with `route: true`, Jev scores whether a self-contained project
+investigation would benefit from a delegate. For an `explore` route and a score
+of at least 0.65, the harness runs the delegate before the main model responds
+and includes its findings as context. The main model can also invoke
+`jev_delegate` with a focused question.
+
+With `delegateModel` set, routes are advisory. The harness appends the route and
+delegate findings to the turn's message history and leaves tools and the system
+prompt stable across routed turns to preserve the cacheable prefix.
+
+The delegate runs in memory in the same project. It can use the caller's enabled
+`read`, `grep` and `glob` tools for up to 30 seconds and uses the configured omp
+provider credentials. If automatic delegation fails, the main model continues
+the turn. Successful runs log the trigger (`route` or `tool`), model, duration
+and tool names in `~/.jev-harness/log.jsonl`.
 
 ```sh
 PI_JEV_DELEGATE_MODEL=magpie/group/jev-delegate omp --no-extensions -e ./index.ts -p \

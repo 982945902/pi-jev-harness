@@ -1,4 +1,5 @@
-import type { AgentSession, ExtensionAPI } from '@oh-my-pi/pi-coding-agent'
+import type { ExtensionContext as PiExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { AgentSession, ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
 
 import { DELEGATE_TOOL, type Harness } from './types.ts'
 
@@ -12,7 +13,20 @@ const SYSTEM_PROMPT = [
 	'Return concise findings with file paths and line numbers. Say when evidence is missing.'
 ].join(' ')
 
-export function registerDelegate(pi: ExtensionAPI, h: Harness, modelSpec: string): void {
+type DelegateContext = Pick<ExtensionContext, 'cwd' | 'models' | 'modelRegistry'>
+
+type Trigger = 'tool' | 'route'
+
+export type RoutedDelegate = (goal: string, ctx: PiExtensionContext) => Promise<string | null>
+
+export function registerDelegate(pi: ExtensionAPI, h: Harness, modelSpec: string): RoutedDelegate {
+	let prepared: { goal: string; cwd: string; result: Promise<string | null> } | undefined
+	pi.on('message_start', ({ message }) => {
+		if (message.role === 'user') prepared = undefined
+	})
+	pi.on('agent_end', () => {
+		prepared = undefined
+	})
 	const z = pi.zod
 	pi.registerTool({
 		name: DELEGATE_TOOL,
@@ -21,46 +35,82 @@ export function registerDelegate(pi: ExtensionAPI, h: Harness, modelSpec: string
 		description:
 			'Delegate a focused project investigation to a separate model that can read, search and list files. Provide the question and any relevant paths or constraints.',
 		parameters: z.object({ goal: z.string().min(1).max(4000) }),
-		async execute(_toolCallId, { goal }, signal, _onUpdate, ctx) {
-			if (h.config.mode !== 'on') throw new Error('Jev delegation requires /jev-harness on.')
-			const model = ctx.models.resolve(modelSpec)
-			if (!model || `${model.provider}/${model.id}` !== modelSpec) {
-				throw new Error(`Jev delegate model is unavailable: ${modelSpec}`)
-			}
-			const activeTools = h.allTools ?? pi.getActiveTools()
-			const toolNames = TOOL_NAMES.filter((name) => activeTools.includes(name))
-			if (!toolNames.length)
-				throw new Error('Jev delegation requires an active read, grep or glob tool.')
-			const started = Date.now()
-			const timeout = AbortSignal.timeout(TIMEOUT_MS)
-			const stop = signal ? AbortSignal.any([signal, timeout]) : timeout
-			stop.throwIfAborted()
-			const { createAgentSession, SessionManager, AgentRegistry } = pi.pi
-			const { session } = await createAgentSession({
-				cwd: ctx.cwd,
-				model,
-				modelRegistry: ctx.modelRegistry,
-				agentRegistry: new AgentRegistry(),
-				sessionManager: SessionManager.inMemory(ctx.cwd),
-				disableExtensionDiscovery: true,
-				disableModelFallback: true,
-				disableServerSideFallback: true,
-				bindProcessState: false,
-				enableMCP: false,
-				enableLsp: false,
-				skipPythonPreflight: true,
-				enableIrc: false,
-				noContextFiles: true,
-				skills: [],
-				rules: [],
-				systemPrompt: SYSTEM_PROMPT,
-				thinkingLevel: 'off',
-				toolNames,
-				restrictToolNames: true
-			})
-			return runDelegate(h, session, modelSpec, goal, stop, started)
-		}
+		execute: (_toolCallId, { goal }, signal, _onUpdate, ctx) =>
+			executeDelegate(pi, h, modelSpec, goal, ctx, 'tool', signal)
 	})
+	return (goal, ctx) => {
+		// OMP can replay startup hooks before accepting the user message.
+		if (prepared?.goal === goal && prepared.cwd === ctx.cwd) return prepared.result
+		// SAFETY: this callback is only registered on OMP and receives its extension context.
+		const result = executeDelegate(
+			pi,
+			h,
+			modelSpec,
+			goal,
+			ctx as typeof ctx & DelegateContext,
+			'route'
+		)
+			.then(({ content }) => content[0]?.text ?? null)
+			.catch((err: unknown) => {
+				h.log({
+					what: 'delegate',
+					trigger: 'route',
+					model: modelSpec,
+					error: err instanceof Error ? err.message : String(err)
+				})
+				return null
+			})
+		prepared = { goal, cwd: ctx.cwd, result }
+		return result
+	}
+}
+
+async function executeDelegate(
+	pi: ExtensionAPI,
+	h: Harness,
+	modelSpec: string,
+	goal: string,
+	ctx: DelegateContext,
+	trigger: Trigger,
+	signal?: AbortSignal
+) {
+	if (h.config.mode !== 'on') throw new Error('Jev delegation requires /jev-harness on.')
+	const model = ctx.models.resolve(modelSpec)
+	if (!model || `${model.provider}/${model.id}` !== modelSpec) {
+		throw new Error(`Jev delegate model is unavailable: ${modelSpec}`)
+	}
+	const activeTools = h.allTools ?? pi.getActiveTools()
+	const toolNames = TOOL_NAMES.filter((name) => activeTools.includes(name))
+	if (!toolNames.length)
+		throw new Error('Jev delegation requires an active read, grep or glob tool.')
+	const started = Date.now()
+	const timeout = AbortSignal.timeout(TIMEOUT_MS)
+	const stop = signal ? AbortSignal.any([signal, timeout]) : timeout
+	stop.throwIfAborted()
+	const { createAgentSession, SessionManager, AgentRegistry } = pi.pi
+	const { session } = await createAgentSession({
+		cwd: ctx.cwd,
+		model,
+		modelRegistry: ctx.modelRegistry,
+		agentRegistry: new AgentRegistry(),
+		sessionManager: SessionManager.inMemory(ctx.cwd),
+		disableExtensionDiscovery: true,
+		disableModelFallback: true,
+		disableServerSideFallback: true,
+		bindProcessState: false,
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+		enableIrc: false,
+		noContextFiles: true,
+		skills: [],
+		rules: [],
+		systemPrompt: SYSTEM_PROMPT,
+		thinkingLevel: 'off',
+		toolNames,
+		restrictToolNames: true
+	})
+	return runDelegate(h, session, modelSpec, goal, stop, started, trigger)
 }
 
 async function runDelegate(
@@ -69,7 +119,8 @@ async function runDelegate(
 	model: string,
 	goal: string,
 	stop: AbortSignal,
-	started: number
+	started: number,
+	trigger: Trigger
 ) {
 	const tools: string[] = []
 	const unsubscribe = session.subscribe((event) => {
@@ -95,7 +146,7 @@ async function runDelegate(
 			throw new Error('Jev delegate returned a tool request as text instead of findings.')
 		}
 		const details = { model, tools, ms: Date.now() - started }
-		h.log({ what: 'delegate', ...details })
+		h.log({ what: 'delegate', trigger, ...details })
 		return { content: [{ type: 'text' as const, text }], details }
 	} finally {
 		stop.removeEventListener('abort', cancel)

@@ -6,8 +6,23 @@ import type {
 	ExtensionContext
 } from '@earendil-works/pi-coding-agent'
 
-import { choiceOf, noulOf, relevanceQuestions, routingQuestions, THRESHOLDS } from './jev.ts'
-import { active, short, THRESHOLD_ALWAYS_KEEP, type Candidate, type Harness } from './types.ts'
+import type { RoutedDelegate } from './delegate.ts'
+import {
+	choiceOf,
+	delegateQuestion,
+	noulOf,
+	relevanceQuestions,
+	routingQuestions,
+	THRESHOLDS
+} from './jev.ts'
+import {
+	active,
+	DELEGATE_TOOL,
+	short,
+	THRESHOLD_ALWAYS_KEEP,
+	type Candidate,
+	type Harness
+} from './types.ts'
 
 const STOPWORDS = new Set([
 	'about',
@@ -274,14 +289,18 @@ async function route(
 	h: Harness,
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	prompt: string
-): Promise<{ kind: string; note: string } | null> {
+	prompt: string,
+	preserveTools: boolean,
+	canDelegate: boolean
+): Promise<{ note: string; delegate: boolean } | null> {
 	const names = pi.getActiveTools()
 	const tools = pi
 		.getAllTools()
 		.filter((tool) => names.includes(tool.name))
 		.map((tool) => ({ name: tool.name, description: short(tool.description, 200) }))
-	const result = await h.jev('route', { prompt, cwd: ctx.cwd, tools }, routingQuestions(names), ctx)
+	const questions = routingQuestions(names)
+	if (canDelegate && names.includes(DELEGATE_TOOL)) questions.delegate_worthwhile = delegateQuestion
+	const result = await h.jev('route', { prompt, cwd: ctx.cwd, tools }, questions, ctx)
 	if (!result) return null
 	const kind = choiceOf(result.answers, 'kind')
 	const keep = names.filter(
@@ -290,9 +309,10 @@ async function route(
 			noulOf(result.answers, `use_${name}`) >= THRESHOLDS.toolNeeded
 	)
 	const hidden = names.filter((name) => !keep.includes(name))
-	let note = `kind ${kind.choice} (${kind.confidence.toFixed(2)}), tools ${keep.join(',')}`
-	if (hidden.length) note += ` (hidden: ${hidden.join(',')})`
-	if (h.config.mode === 'on' && kind.choice !== 'answer' && hidden.length) {
+	const toolLabel = preserveTools ? 'suggested tools' : 'tools'
+	let note = `kind ${kind.choice} (${kind.confidence.toFixed(2)}), ${toolLabel} ${keep.join(',')}`
+	if (!preserveTools && hidden.length) note += ` (hidden: ${hidden.join(',')})`
+	if (!preserveTools && h.config.mode === 'on' && kind.choice !== 'answer' && hidden.length) {
 		h.allTools = names
 		pi.setActiveTools(keep)
 		h.stats.toolsHidden += hidden.length
@@ -300,22 +320,32 @@ async function route(
 	if (h.config.mode === 'on' && kind.choice === 'unclear' && kind.confidence >= 0.7) {
 		note += '; ask one clarifying question before using tools'
 	}
-	return { kind: kind.choice, note }
+	const judgment = result.answers.delegate_worthwhile
+	const delegate =
+		canDelegate &&
+		kind.choice === 'explore' &&
+		judgment?.type === 'noul' &&
+		judgment.noul >= THRESHOLDS.delegateWorthwhile
+	return { note, delegate }
 }
 
 export async function onBeforeAgentStart(
 	h: Harness,
 	pi: ExtensionAPI,
 	event: BeforeAgentStartEvent,
-	ctx: ExtensionContext
+	ctx: ExtensionContext,
+	delegate?: RoutedDelegate
 ) {
 	h.task = event.prompt
 	h.recent.length = 0
 	h.loopChecked = false
-	if (!active(h)) return undefined
+	if (!active(h) || !event.prompt.trim()) return undefined
 	h.stats.turns++
 	if (h.config.route || h.config.prefetch) h.status(ctx, 'jev: looking for context…')
-	const routePromise = h.config.route ? route(h, pi, ctx, event.prompt) : Promise.resolve(null)
+	const canDelegate = !!delegate && !event.images?.length && event.prompt.length <= 4000
+	const routePromise = h.config.route
+		? route(h, pi, ctx, event.prompt, !!delegate, canDelegate)
+		: Promise.resolve(null)
 	const prefetchPromise = h.config.prefetch
 		? prefetch(h, pi, ctx, event.prompt)
 		: Promise.resolve(null)
@@ -326,17 +356,30 @@ export async function onBeforeAgentStart(
 			return [null, null] as const
 		}
 	)
+	let findings: string | null = null
+	if (h.config.mode === 'on' && routed?.delegate && delegate) {
+		h.status(ctx, 'jev: delegating project investigation…')
+		findings = await delegate(event.prompt, ctx)
+	}
 	const notes = [routed?.note, fetched?.note].filter((note): note is string => !!note)
+	if (findings) notes.push('delegate returned project findings')
 	if (fetched?.message && ctx.hasUI) ctx.ui.notify(`jev ${fetched.note}`, 'info')
 	h.status(ctx, notes[0] ? `jev ${notes.join('; ')}` : `jev-harness ${h.config.mode}`)
 	if (h.config.mode !== 'on') return undefined
-	const systemPrompt = routed
-		? `${event.systemPrompt}\n\njev-harness routed this turn: ${routed.note}. Tools not listed are hidden for this turn; say so if you need one.`
-		: undefined
+	const routeNote = delegate && routed ? `Jev route suggestion: ${routed.note}` : undefined
+	const context = [routeNote, fetched?.message]
+	if (findings) {
+		context.push(
+			`Read-only project findings from Jev delegation. Use these as evidence and verify gaps directly.\n\n${findings}`
+		)
+	}
+	const message = context.filter(Boolean).join('\n\n')
+	const systemPrompt =
+		routed && !delegate
+			? `${event.systemPrompt}\n\njev-harness routed this turn: ${routed.note}. Tools not listed are hidden for this turn; say so if you need one.`
+			: undefined
 	return {
 		...(systemPrompt ? { systemPrompt } : {}),
-		...(fetched?.message
-			? { message: { customType: 'jev-harness', content: fetched.message, display: false } }
-			: {})
+		...(message ? { message: { customType: 'jev-harness', content: message, display: false } } : {})
 	}
 }

@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { ExtensionAPI as OmpExtensionAPI } from '@oh-my-pi/pi-coding-agent'
 
-import { registerDelegate } from './delegate.ts'
+import { registerDelegate, type RoutedDelegate } from './delegate.ts'
 import { ask } from './jev.ts'
 import { onBeforeAgentStart } from './route.ts'
 import { onToolCall, onToolResult } from './tools.ts'
@@ -137,9 +137,10 @@ export default function (pi: ExtensionAPI) {
 	const h = createHarness()
 
 	const delegateModel = process.env.PI_JEV_DELEGATE_MODEL?.trim() || h.config.delegateModel
+	let delegate: RoutedDelegate | undefined
 	if (delegateModel && 'pi' in pi && 'zod' in pi) {
 		// SAFETY: omp supplies the host SDK and schema builder; Pi does not expose these members.
-		registerDelegate(pi as typeof pi & OmpExtensionAPI, h, delegateModel)
+		delegate = registerDelegate(pi as typeof pi & OmpExtensionAPI, h, delegateModel)
 	}
 
 	pi.on('session_start', (_event, ctx) => {
@@ -148,7 +149,7 @@ export default function (pi: ExtensionAPI) {
 		h.status(ctx, active(h) ? `jev-harness ${h.config.mode}` : undefined)
 	})
 
-	pi.on('before_agent_start', (event, ctx) => onBeforeAgentStart(h, pi, event, ctx))
+	pi.on('before_agent_start', (event, ctx) => onBeforeAgentStart(h, pi, event, ctx, delegate))
 
 	pi.on('agent_end', () => {
 		if (!h.allTools) return
