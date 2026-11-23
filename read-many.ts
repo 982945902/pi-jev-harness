@@ -1,7 +1,12 @@
 import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent'
 
-const GUIDANCE =
-	'For multiple independent reads, use one JS eval cell with code `read_many(["src/a.ts:1-30", "src/b.ts:12-20:raw"])`. Each path uses the native read tool. Use a standalone call with a JSON array of path strings.'
+const GUIDANCE = [
+	'When the next step is to read two or more already-known independent file paths or ranges, use one `eval` call with the Jev Harness `read_many` shortcut.',
+	'Send these arguments, replacing only the example paths:',
+	`\`${JSON.stringify({ language: 'js', code: 'read_many(["src/a.ts:1-30","src/b.ts:12-20:raw"])' })}\``,
+	'Put the bare `read_many([...])` expression in the entire `code` field. Jev Harness expands it before JavaScript runs and prints the results automatically.',
+	'Use native `read` for a single path or when a prior result determines the next path.'
+].join('\n')
 
 function batchCode(paths: readonly string[]): string {
 	return `{
@@ -17,11 +22,11 @@ function batchCode(paths: readonly string[]): string {
 }
 
 export function registerReadMany(pi: ExtensionAPI, enabled: () => boolean): void {
-	pi.on('before_agent_start', () => {
+	pi.on('before_agent_start', ({ systemPrompt }) => {
 		if (!enabled()) return undefined
 		const tools = pi.getActiveTools()
 		if (!tools.includes('eval') || !tools.includes('read')) return undefined
-		return { message: { customType: 'jev-read-many', content: GUIDANCE, display: false } }
+		return { systemPrompt: [...systemPrompt, GUIDANCE] }
 	})
 
 	pi.on('tool_call', ({ toolName, input }) => {

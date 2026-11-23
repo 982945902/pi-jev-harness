@@ -69,10 +69,12 @@ With Jev Harness in `on` mode, pass this as the entire `code` of a JavaScript
 read_many(["src/a.ts:1-30", "src/b.ts:12-20:raw"])
 ```
 
-Use a JSON array of path strings. Each path, including its selectors, goes to
-omp's native `read` through the eval bridge and follows the session's `read`
-approval policy. Results appear in input order, with an error for each read
-that fails. The outer call also follows the session's `eval` approval policy.
+Use a JSON array of path strings. Jev Harness expands the standalone call before
+JavaScript runs and prints the results automatically. Each path, including its
+selectors, goes to omp's native `read` through the eval bridge and follows the
+session's `read` approval policy. Results appear in input order, with an error
+for each read that fails. The outer call also follows the session's `eval`
+approval policy.
 
 ## Commands
 
