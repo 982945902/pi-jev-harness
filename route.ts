@@ -370,7 +370,7 @@ export async function onBeforeAgentStart(
 	const context = [routeNote, fetched?.message]
 	if (findings) {
 		context.push(
-			`Read-only project findings from Jev delegation. Use these as evidence and verify gaps directly.\n\n${findings}`
+			`Read-only project findings from Jev delegation. Use complete, cited findings to answer directly. Reopen files only for a specific missing fact or a contradiction.\n\n${findings}`
 		)
 	}
 	const message = context.filter(Boolean).join('\n\n')

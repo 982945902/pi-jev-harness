@@ -41,8 +41,9 @@ that supports native tool calls or a gateway routing group such as
 In `on` mode with `route: true`, Jev scores whether a self-contained project
 investigation would benefit from a delegate. For an `explore` route and a score
 of at least 0.65, the harness runs the delegate before the main model responds
-and includes its findings as context. The main model can also invoke
-`jev_delegate` with a focused question.
+and includes its findings as context. The main model is instructed to answer
+from complete, cited findings and reopen files to resolve a specific gap or
+contradiction. It can also invoke `jev_delegate` with a focused question.
 
 With `delegateModel` set, routes are advisory. The harness appends the route and
 delegate findings to the turn's message history and leaves tools and the system
