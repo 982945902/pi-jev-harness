@@ -33,6 +33,23 @@ Pre-fetch pays off on vague prompts that would take several tool calls to locate
 
 The footer shows the last Jev verdict. Every Jev call is logged with its answers to `~/.jev-harness/log.jsonl`.
 
+### Delegate a project investigation in omp
+
+Set `delegateModel` to an exact `provider/model` from `omp models`. Use a model
+that supports native tool calls or a gateway routing group such as
+`magpie/group/jev-delegate`. For a single run, set `PI_JEV_DELEGATE_MODEL` instead.
+The setting enables `jev_delegate` in omp. In `on` mode the main model can send
+a focused question to the delegate, which runs an in-memory session in the same
+project and returns its findings. The delegate can use the caller's enabled
+`read`, `grep` and `glob` tools for up to 30 seconds. It uses the configured omp
+provider credentials. Successful runs log the delegate model, duration and tool
+names in `~/.jev-harness/log.jsonl`.
+
+```sh
+PI_JEV_DELEGATE_MODEL=magpie/group/jev-delegate omp --no-extensions -e ./index.ts -p \
+  'Use jev_delegate to find how route.ts decides which tools to keep.'
+```
+
 ## Commands
 
 ```
@@ -80,6 +97,7 @@ Set `route` to `true` only if you accept its cache tradeoff. Thresholds live in 
 - `tools.ts`: loop control, guard, result trimming.
 - `types.ts`: config, stats, shared types.
 - `index.ts`: wiring, stats, the command.
+- `delegate.ts`: omp tool registration and the read-only delegate session.
 - `try.ts`: dry run of routing and pre-fetch on a prompt against the current directory.
 
 ## Try it without pi

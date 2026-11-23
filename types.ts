@@ -20,6 +20,7 @@ export type Config = {
 	apiKey?: string
 	baseUrl?: string
 	model?: string
+	delegateModel?: string
 }
 
 export type Stats = {
@@ -62,9 +63,11 @@ export type Harness = {
 	) => Promise<Result | null>
 }
 
-export const THRESHOLD_ALWAYS_KEEP = ['read'] // never hide these, whatever Jev says
+export const DELEGATE_TOOL = 'jev_delegate'
 
-export const READ_TOOLS = ['read', 'grep', 'find', 'ls']
+export const THRESHOLD_ALWAYS_KEEP = ['read', DELEGATE_TOOL]
+
+export const READ_TOOLS = ['read', 'grep', 'find', 'ls', DELEGATE_TOOL]
 
 export const active = (h: Harness): boolean =>
 	h.config.mode !== 'off' && !!resolveJevApiKey(h.config)
