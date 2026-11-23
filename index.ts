@@ -16,6 +16,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import type { ExtensionAPI as OmpExtensionAPI } from '@oh-my-pi/pi-coding-agent'
 
 import { registerDelegate, type RoutedDelegate } from './delegate.ts'
+import { registerToolDiscovery } from './discover.ts'
 import { ask } from './jev.ts'
 import { registerReadMany } from './read-many.ts'
 import { onBeforeAgentStart } from './route.ts'
@@ -31,6 +32,8 @@ const DEFAULTS: Config = {
 	guard: true,
 	prefetchFiles: 2,
 	prefetchLines: 120,
+	prefetchBudgetMs: 1200,
+	delegateBudgetMs: 12_000,
 	trimMinChars: 6000,
 	keepHeadChars: 2000,
 	timeoutMs: 3000,
@@ -42,6 +45,8 @@ const CONFIG_FILE = join(homedir(), '.pi', 'agent', 'jev-harness.json')
 const LOG_DIR = join(homedir(), '.jev-harness')
 
 const PRICE_PER_MTOK = 0.042
+
+const ROUTE_OVERRIDE = process.env.PI_JEV_ROUTE_STRATEGY
 
 function loadConfig(): Config {
 	try {
@@ -81,6 +86,42 @@ function report(h: Harness, ctx: ExtensionContext): void {
 	)
 }
 
+function createJevClient(config: Config, stats: Stats): Harness['jev'] {
+	return async (what, state, questions, ctx, options) => {
+		const started = performance.now()
+		const signal = options?.signal ?? ctx.signal
+		const metrics = {
+			sessionId: ctx.sessionManager.getSessionId(),
+			...options?.metrics,
+			questions: Object.keys(questions).length
+		}
+		try {
+			const result = await ask(state, questions, {
+				timeoutMs: config.timeoutMs,
+				apiKey: config.apiKey,
+				baseUrl: config.baseUrl,
+				model: config.model,
+				signal
+			})
+			stats.jevCalls++
+			stats.jevMs += result.ms
+			stats.jevTokens += result.inputTokens
+			log({ what, ...metrics, ms: result.ms, tokens: result.inputTokens, answers: result.answers })
+			return result
+		} catch (err) {
+			stats.errors++
+			log({
+				what,
+				...metrics,
+				ms: Math.round(performance.now() - started),
+				errorName: err instanceof Error ? err.name : 'UnknownError',
+				error: err instanceof Error ? err.message : String(err)
+			})
+			return null
+		}
+	}
+}
+
 function createHarness(): Harness {
 	const config = loadConfig()
 	const stats: Stats = {
@@ -110,26 +151,7 @@ function createHarness(): Harness {
 			if (ctx.hasUI && config.showStatus) ctx.ui.setStatus('jev-harness', text)
 		},
 		log,
-		jev: async (what, state, questions, ctx) => {
-			try {
-				const result = await ask(state, questions, {
-					timeoutMs: config.timeoutMs,
-					apiKey: config.apiKey,
-					baseUrl: config.baseUrl,
-					model: config.model,
-					signal: ctx.signal
-				})
-				stats.jevCalls++
-				stats.jevMs += result.ms
-				stats.jevTokens += result.inputTokens
-				log({ what, ms: result.ms, tokens: result.inputTokens, answers: result.answers })
-				return result
-			} catch (err) {
-				stats.errors++
-				log({ what, error: err instanceof Error ? err.message : String(err) })
-				return null
-			}
-		}
+		jev: createJevClient(config, stats)
 	}
 	return h
 }
@@ -142,14 +164,29 @@ export default function (pi: ExtensionAPI) {
 	const omp = 'pi' in pi && 'zod' in pi ? (pi as typeof pi & OmpExtensionAPI) : undefined
 	const delegate: RoutedDelegate | undefined =
 		delegateModel && omp ? registerDelegate(omp, h, delegateModel) : undefined
+	if (omp) registerToolDiscovery(omp, h)
 
 	pi.on('session_start', (_event, ctx) => {
 		Object.assign(h.config, loadConfig())
+		if (ROUTE_OVERRIDE === 'off') h.config.route = false
+		if (ROUTE_OVERRIDE === 'compact' || ROUTE_OVERRIDE === 'full') {
+			h.config.route = true
+			h.config.routeStrategy = ROUTE_OVERRIDE
+		}
 		h.sent.clear()
 		h.status(ctx, active(h) ? `jev-harness ${h.config.mode}` : undefined)
 	})
 
-	pi.on('before_agent_start', (event, ctx) => onBeforeAgentStart(h, pi, event, ctx, delegate))
+	pi.on('before_agent_start', (event, ctx) =>
+		onBeforeAgentStart(
+			h,
+			pi,
+			event,
+			ctx,
+			delegate,
+			h.config.routeStrategy ?? (omp ? 'compact' : 'full')
+		)
+	)
 
 	pi.on('agent_end', () => {
 		if (!h.allTools) return

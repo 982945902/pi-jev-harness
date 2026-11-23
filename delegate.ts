@@ -1,3 +1,4 @@
+import { addAbortListener } from 'node:events'
 import type { ExtensionContext as PiExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { AgentSession, ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent'
 
@@ -13,7 +14,7 @@ const SYSTEM_PROMPT = [
 	'Return concise findings with file paths and line numbers. Say when evidence is missing.'
 ].join(' ')
 
-type DelegateContext = Pick<ExtensionContext, 'cwd' | 'models' | 'modelRegistry'>
+type DelegateContext = Pick<ExtensionContext, 'cwd' | 'models' | 'modelRegistry' | 'sessionManager'>
 
 type Trigger = 'tool' | 'route'
 
@@ -41,6 +42,9 @@ export function registerDelegate(pi: ExtensionAPI, h: Harness, modelSpec: string
 	return (goal, ctx) => {
 		// OMP can replay startup hooks before accepting the user message.
 		if (prepared?.goal === goal && prepared.cwd === ctx.cwd) return prepared.result
+		const started = performance.now()
+		const budget = AbortSignal.timeout(h.config.delegateBudgetMs)
+		const signal = ctx.signal ? AbortSignal.any([budget, ctx.signal]) : budget
 		// SAFETY: this callback is only registered on OMP and receives its extension context.
 		const result = executeDelegate(
 			pi,
@@ -48,20 +52,38 @@ export function registerDelegate(pi: ExtensionAPI, h: Harness, modelSpec: string
 			modelSpec,
 			goal,
 			ctx as typeof ctx & DelegateContext,
-			'route'
+			'route',
+			signal
 		)
+		const findings = withinBudget(result, signal)
 			.then(({ content }) => content[0]?.text ?? null)
 			.catch((err: unknown) => {
+				let reason = 'failed'
+				if (budget.aborted) reason = 'budget'
+				else if (ctx.signal?.aborted) reason = 'cancelled'
 				h.log({
 					what: 'delegate',
+					sessionId: ctx.sessionManager.getSessionId(),
 					trigger: 'route',
 					model: modelSpec,
+					ms: Math.round(performance.now() - started),
+					reason,
 					error: err instanceof Error ? err.message : String(err)
 				})
 				return null
 			})
-		prepared = { goal, cwd: ctx.cwd, result }
-		return result
+		prepared = { goal, cwd: ctx.cwd, result: findings }
+		return findings
+	}
+}
+
+async function withinBudget<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+	const { promise: deadline, reject } = Promise.withResolvers<never>()
+	const listener = addAbortListener(signal, () => reject(signal.reason))
+	try {
+		return await Promise.race([work, deadline])
+	} finally {
+		listener[Symbol.dispose]()
 	}
 }
 
@@ -110,7 +132,8 @@ async function executeDelegate(
 		toolNames,
 		restrictToolNames: true
 	})
-	return runDelegate(h, session, modelSpec, goal, stop, started, trigger)
+	const sessionId = ctx.sessionManager.getSessionId()
+	return runDelegate(h, session, modelSpec, goal, stop, { started, trigger, sessionId })
 }
 
 async function runDelegate(
@@ -119,8 +142,7 @@ async function runDelegate(
 	model: string,
 	goal: string,
 	stop: AbortSignal,
-	started: number,
-	trigger: Trigger
+	{ started, trigger, sessionId }: { started: number; trigger: Trigger; sessionId: string }
 ) {
 	const tools: string[] = []
 	const unsubscribe = session.subscribe((event) => {
@@ -145,8 +167,9 @@ async function runDelegate(
 		if (/^\s*<(?:tool_call|function)(?:[\s=>])/.test(text)) {
 			throw new Error('Jev delegate returned a tool request as text instead of findings.')
 		}
-		const details = { model, tools, ms: Date.now() - started }
-		h.log({ what: 'delegate', trigger, ...details })
+		const { tokens, assistantMessages } = session.getSessionStats()
+		const details = { model, tools, ms: Date.now() - started, tokens, assistantMessages }
+		h.log({ what: 'delegate', sessionId, trigger, ...details })
 		return { content: [{ type: 'text' as const, text }], details }
 	} finally {
 		stop.removeEventListener('abort', cancel)

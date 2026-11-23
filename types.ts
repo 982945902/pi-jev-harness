@@ -7,12 +7,15 @@ export type Mode = 'on' | 'log' | 'off' // log = ask Jev and record, change noth
 export type Config = {
 	mode: Mode
 	route: boolean
+	routeStrategy?: 'compact' | 'full'
 	prefetch: boolean
 	trim: boolean
 	loop: boolean
 	guard: boolean
 	prefetchFiles: number
 	prefetchLines: number
+	prefetchBudgetMs: number
+	delegateBudgetMs: number
 	trimMinChars: number
 	keepHeadChars: number
 	timeoutMs: number
@@ -59,15 +62,18 @@ export type Harness = {
 		what: string,
 		state: unknown,
 		questions: Record<string, Question>,
-		ctx: ExtensionContext
+		ctx: { sessionManager: { getSessionId(): string }; signal?: AbortSignal | undefined },
+		options?: { signal?: AbortSignal; metrics?: Record<string, number | string> }
 	) => Promise<Result | null>
 }
 
 export const DELEGATE_TOOL = 'jev_delegate'
 
+export const DISCOVER_TOOL = 'jev_find_tools'
+
 export const THRESHOLD_ALWAYS_KEEP = ['read', DELEGATE_TOOL]
 
-export const READ_TOOLS = ['read', 'grep', 'find', 'ls', DELEGATE_TOOL]
+export const READ_TOOLS = ['read', 'grep', 'find', 'ls', DELEGATE_TOOL, DISCOVER_TOOL]
 
 export const active = (h: Harness): boolean =>
 	h.config.mode !== 'off' && !!resolveJevApiKey(h.config)

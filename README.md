@@ -17,7 +17,7 @@ No runtime dependencies. Node 22.18 or newer. `rg` (ripgrep) on the path for con
 
 Five things, each one Jev request, each switchable in config.
 
-**1. Route the turn** (`before_agent_start`, opt-in). Jev can read the prompt and the active tool list, then decide which tools to keep for the turn. It is off by default: tool schemas live in Pi's cached system prompt, so hiding them per turn saves little and can break that cache. When enabled, hidden tools are restored at `agent_end`, and the system prompt notes the route.
+**1. Route the turn** (`before_agent_start`, opt-in). OMP defaults to compact routing, which asks Jev for the turn kind and, when eligible, whether a delegate would help. The tool list stays stable. Use `jev_find_tools` to look up specialist tools by service and operation. It searches enabled tools locally and asks Jev to rerank at most 12 matches. `routeStrategy: "full"` uses the original per-tool scoring. Full routing can hide tools for the turn when no delegate is configured.
 
 **2. Pre-fetch context** (`before_agent_start`, when pre-fetch is enabled). Code pulls terms from a vague prompt and sends matching lines from up to forty files to Jev. If the prompt names a file and `rg --files` finds it, pre-fetch stops: the model can make a cheaper targeted read itself. Otherwise Jev ranks the candidates. At most two files qualify when Jev's `first` confidence or file score reaches 0.6. The harness injects 15-line windows around matching lines, merges overlapping windows, and caps the total at 120 lines per file. It never injects a file twice in one session. The injected message stays out of the transcript; the footer lists its file ranges.
 
@@ -49,11 +49,12 @@ With `delegateModel` set, routes are advisory. The harness appends the route and
 delegate findings to the turn's message history and leaves tools and the system
 prompt stable across routed turns to preserve the cacheable prefix.
 
-The delegate runs in memory in the same project. It can use the caller's enabled
-`read`, `grep` and `glob` tools for up to 30 seconds and uses the configured omp
-provider credentials. If automatic delegation fails, the main model continues
-the turn. Successful runs log the trigger (`route` or `tool`), model, duration
-and tool names in `~/.jev-harness/log.jsonl`.
+The delegate runs in memory in the same project and can use the caller's enabled
+`read`, `grep` and `glob` tools. Automatic delegation waits up to 12 seconds by
+default, then the main model continues. Explicit `jev_delegate` calls have a
+30-second execution budget. The log includes elapsed time, tool names and child
+model usage for successful runs, plus the reason and elapsed time for failed
+automatic runs.
 
 ```sh
 PI_JEV_DELEGATE_MODEL=magpie/group/jev-delegate omp --no-extensions -e ./index.ts -p \
@@ -75,6 +76,13 @@ selectors, goes to omp's native `read` through the eval bridge and follows the
 session's `read` approval policy. Results appear in input order, with an error
 for each read that fails. The outer call also follows the session's `eval`
 approval policy.
+
+For broad scans, the optional preview form caps successful text per path while
+preserving per-path errors. Use targeted line ranges for the evidence you need.
+
+```text
+read_many({"paths":["src/a.ts","src/b.ts"],"maxCharsPerPath":4000})
+```
 
 ## Commands
 
@@ -102,6 +110,8 @@ Optional `~/.pi/agent/jev-harness.json`:
 	"guard": true,
 	"prefetchFiles": 2,
 	"prefetchLines": 120,
+	"prefetchBudgetMs": 1200,
+	"delegateBudgetMs": 12000,
 	"trimMinChars": 6000,
 	"keepHeadChars": 2000,
 	"timeoutMs": 3000,
@@ -114,7 +124,15 @@ For a System One gateway, set `baseUrl` to its full System One endpoint and
 requires its own bearer key. With no gateway configured, the extension uses
 TypeSafe and `TYPESAFE_API_KEY`.
 
-Set `route` to `true` only if you accept its cache tradeoff. Thresholds live in `jev.ts` next to the questions: tool kept at 0.35, file pre-fetched at 0.6, result dropped below 0.3 relevance, stuck at 0.7, secrets at 0.7.
+On OMP, omit `routeStrategy` to use compact routing when `route` is enabled. On Pi,
+the default is `full`. Set `PI_JEV_ROUTE_STRATEGY=compact`, `full`, or `off` to
+override routing for a single process. Prefetch's budget covers file discovery
+and the Jev request together. `timeoutMs` still caps each Jev request.
+Thresholds live in `jev.ts` next to the questions.
+
+To move eligible MCP tools into OMP eval namespaces for a comparison, run OMP
+with a `--config` overlay containing `mcp.evalNamespaces: true`. Tool discovery
+still searches enabled tools, including those presented in namespaces.
 
 ## Files
 

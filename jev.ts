@@ -45,25 +45,20 @@ export async function ask(
 	const apiKey = resolveJevApiKey(options)
 	if (!apiKey) throw new Error('Set apiKey in jev-harness.json or set TYPESAFE_API_KEY')
 	const started = performance.now()
-	const controller = new AbortController()
-	const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 3000)
-	options.signal?.addEventListener('abort', () => controller.abort(), { once: true })
-	try {
-		const response = await fetch(options.baseUrl ?? 'https://api.typesafe.ai/v1/systemone', {
-			method: 'POST',
-			headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ model: options.model ?? 'jev-latest', state, questions }),
-			signal: controller.signal
-		})
-		if (!response.ok) {
-			throw new Error(`TypeSafe API ${response.status}: ${(await response.text()).slice(0, 200)}`)
-		}
-		// SAFETY: the documented System One response shape; the accessors below throw on any mismatch.
-		const { answers, usage } = (await response.json()) as ApiResponse
-		return { answers, inputTokens: usage.input_tokens, ms: Math.round(performance.now() - started) }
-	} finally {
-		clearTimeout(timer)
+	const timeout = AbortSignal.timeout(options.timeoutMs ?? 3000)
+	const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
+	const response = await fetch(options.baseUrl ?? 'https://api.typesafe.ai/v1/systemone', {
+		method: 'POST',
+		headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+		body: JSON.stringify({ model: options.model ?? 'jev-latest', state, questions }),
+		signal
+	})
+	if (!response.ok) {
+		throw new Error(`TypeSafe API ${response.status}: ${(await response.text()).slice(0, 200)}`)
 	}
+	// SAFETY: the documented System One response shape; the accessors below throw on any mismatch.
+	const { answers, usage } = (await response.json()) as ApiResponse
+	return { answers, inputTokens: usage.input_tokens, ms: Math.round(performance.now() - started) }
 }
 
 export const noul = (instructions: string): Question => ({ type: 'noul', instructions })

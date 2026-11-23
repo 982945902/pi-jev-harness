@@ -18,6 +18,7 @@ import {
 import {
 	active,
 	DELEGATE_TOOL,
+	DISCOVER_TOOL,
 	short,
 	THRESHOLD_ALWAYS_KEEP,
 	type Candidate,
@@ -117,10 +118,12 @@ function fileArgs(term: string): string[] {
 async function hasNamedFile(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	terms: string[]
+	terms: string[],
+	signal: AbortSignal
 ): Promise<boolean> {
-	const options = { cwd: ctx.cwd, timeout: 2000, ...(ctx.signal ? { signal: ctx.signal } : {}) }
+	const options = { cwd: ctx.cwd, timeout: 2000, signal }
 	for (const term of terms) {
+		if (signal.aborted) break
 		if (!looksLikeFile(term)) continue
 		const result = await pi.exec('rg', fileArgs(term), options).catch(() => null)
 		const paths = (result?.stdout ?? '').split('\n').filter(Boolean)
@@ -134,12 +137,13 @@ async function candidateFiles(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	terms: string[],
-	sent: Set<string>
+	sent: Set<string>,
+	signal: AbortSignal
 ): Promise<Candidate[]> {
 	const files = new Map<string, Candidate['matched']>()
-	const options = { cwd: ctx.cwd, timeout: 2000, ...(ctx.signal ? { signal: ctx.signal } : {}) }
+	const options = { cwd: ctx.cwd, timeout: 2000, signal }
 	for (const term of terms) {
-		if (files.size >= CANDIDATE_LIMIT) break
+		if (signal.aborted || files.size >= CANDIDATE_LIMIT) break
 		const args = [
 			'-n',
 			'-F',
@@ -235,20 +239,22 @@ async function prefetch(
 ): Promise<{ message?: string; note: string } | null> {
 	const terms = termsIn(prompt)
 	if (!terms.length) return null
-	if (await hasNamedFile(pi, ctx, terms)) {
+	const budget = AbortSignal.timeout(h.config.prefetchBudgetMs)
+	const signal = ctx.signal ? AbortSignal.any([budget, ctx.signal]) : budget
+	if (await hasNamedFile(pi, ctx, terms, signal)) {
 		h.stats.prefetchSkipped++
 		return { note: 'named file in prompt, no pre-fetch' }
 	}
-	const list = await candidateFiles(pi, ctx, terms, h.sent)
-	if (!list.length) return null
+	const list = await candidateFiles(pi, ctx, terms, h.sent, signal)
+	if (budget.aborted) h.log({ what: 'prefetch_skip', reason: 'budget', candidates: list.length })
+	if (!list.length || signal.aborted) return null
 	const paths = list.map((file) => file.path)
-	const result = await h.jev(
-		'prefetch',
-		{ task: prompt, files: list },
-		relevanceQuestions(paths),
-		ctx
-	)
-	if (!result) return null
+	const state = { task: prompt, files: list }
+	const result = await h.jev('prefetch', state, relevanceQuestions(paths), ctx, {
+		signal,
+		metrics: { candidates: list.length, stateBytes: Buffer.byteLength(JSON.stringify(state)) }
+	})
+	if (!result || signal.aborted) return null
 	const first = choiceOf(result.answers, 'first')
 	const picked = paths
 		.map((path, index) => {
@@ -284,25 +290,50 @@ async function prefetch(
 	return { message, note: `pre-fetched ${regions.join(', ')}` }
 }
 
-/** Step 1: ask which kind of turn this is and which tools it needs; hide the rest for the turn. */
+type RouteDecision = { note: string; delegate: boolean; hidden?: boolean }
+
+function listedTools(pi: ExtensionAPI, names: string[]) {
+	const enabled = new Set(names)
+	return pi
+		.getAllTools()
+		.flatMap((tool) =>
+			enabled.has(tool.name) ? [{ name: tool.name, description: short(tool.description, 200) }] : []
+		)
+}
+
+/** Score all active tools when the full routing strategy is selected. */
 async function route(
 	h: Harness,
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	prompt: string,
 	preserveTools: boolean,
-	canDelegate: boolean
-): Promise<{ note: string; delegate: boolean } | null> {
+	canDelegate: boolean,
+	strategy: 'compact' | 'full'
+): Promise<RouteDecision | null> {
+	if (!h.config.route) return null
 	const names = pi.getActiveTools()
-	const tools = pi
-		.getAllTools()
-		.filter((tool) => names.includes(tool.name))
-		.map((tool) => ({ name: tool.name, description: short(tool.description, 200) }))
-	const questions = routingQuestions(names)
+	const tools = strategy === 'full' ? listedTools(pi, names) : undefined
+	const questions = routingQuestions(tools ? names : [])
 	if (canDelegate && names.includes(DELEGATE_TOOL)) questions.delegate_worthwhile = delegateQuestion
-	const result = await h.jev('route', { prompt, cwd: ctx.cwd, tools }, questions, ctx)
-	if (!result) return null
+	const state = { prompt, cwd: ctx.cwd, ...(tools && { tools }) }
+	const result = await h.jev('route', state, questions, ctx, {
+		metrics: { strategy, availableTools: names.length }
+	})
+	if (!result || ctx.signal?.aborted) return null
 	const kind = choiceOf(result.answers, 'kind')
+	const judgment = result.answers.delegate_worthwhile
+	const delegate =
+		canDelegate &&
+		kind.choice === 'explore' &&
+		judgment?.type === 'noul' &&
+		judgment.noul >= THRESHOLDS.delegateWorthwhile
+	let note = `kind ${kind.choice} (${kind.confidence.toFixed(2)})`
+	if (!tools) {
+		if (names.includes(DISCOVER_TOOL))
+			note += `. Use ${DISCOVER_TOOL} if you need to locate a specialist tool.`
+		return { note, delegate }
+	}
 	const keep = names.filter(
 		(name) =>
 			THRESHOLD_ALWAYS_KEEP.includes(name) ||
@@ -310,23 +341,19 @@ async function route(
 	)
 	const hidden = names.filter((name) => !keep.includes(name))
 	const toolLabel = preserveTools ? 'suggested tools' : 'tools'
-	let note = `kind ${kind.choice} (${kind.confidence.toFixed(2)}), ${toolLabel} ${keep.join(',')}`
+	note += `, ${toolLabel} ${keep.join(',')}`
 	if (!preserveTools && hidden.length) note += ` (hidden: ${hidden.join(',')})`
-	if (!preserveTools && h.config.mode === 'on' && kind.choice !== 'answer' && hidden.length) {
+	const hide =
+		!preserveTools && h.config.mode === 'on' && kind.choice !== 'answer' && hidden.length > 0
+	if (hide) {
 		h.allTools = names
-		pi.setActiveTools(keep)
+		await Promise.resolve(pi.setActiveTools(keep))
 		h.stats.toolsHidden += hidden.length
 	}
 	if (h.config.mode === 'on' && kind.choice === 'unclear' && kind.confidence >= 0.7) {
 		note += '; ask one clarifying question before using tools'
 	}
-	const judgment = result.answers.delegate_worthwhile
-	const delegate =
-		canDelegate &&
-		kind.choice === 'explore' &&
-		judgment?.type === 'noul' &&
-		judgment.noul >= THRESHOLDS.delegateWorthwhile
-	return { note, delegate }
+	return { note, delegate, hidden: hide }
 }
 
 export async function onBeforeAgentStart(
@@ -334,7 +361,8 @@ export async function onBeforeAgentStart(
 	pi: ExtensionAPI,
 	event: BeforeAgentStartEvent,
 	ctx: ExtensionContext,
-	delegate?: RoutedDelegate
+	delegate?: RoutedDelegate,
+	strategy = h.config.routeStrategy ?? 'full'
 ) {
 	h.task = event.prompt
 	h.recent.length = 0
@@ -343,19 +371,20 @@ export async function onBeforeAgentStart(
 	h.stats.turns++
 	if (h.config.route || h.config.prefetch) h.status(ctx, 'jev: looking for context…')
 	const canDelegate = !!delegate && !event.images?.length && event.prompt.length <= 4000
-	const routePromise = h.config.route
-		? route(h, pi, ctx, event.prompt, !!delegate, canDelegate)
-		: Promise.resolve(null)
+	const routePromise = route(h, pi, ctx, event.prompt, !!delegate, canDelegate, strategy)
 	const prefetchPromise = h.config.prefetch
 		? prefetch(h, pi, ctx, event.prompt)
 		: Promise.resolve(null)
-	const [routed, fetched] = await Promise.all([routePromise, prefetchPromise]).catch(
-		(err: unknown) => {
-			h.stats.errors++
-			h.log({ what: 'error', error: err instanceof Error ? err.message : String(err) })
-			return [null, null] as const
-		}
-	)
+	const [routeResult, prefetchResult] = await Promise.allSettled([routePromise, prefetchPromise])
+	for (const result of [routeResult, prefetchResult]) {
+		if (result.status === 'fulfilled') continue
+		h.stats.errors++
+		const error = result.reason
+		h.log({ what: 'error', error: error instanceof Error ? error.message : String(error) })
+	}
+	if (ctx.signal?.aborted) return undefined
+	const routed = routeResult.status === 'fulfilled' ? routeResult.value : null
+	const fetched = prefetchResult.status === 'fulfilled' ? prefetchResult.value : null
 	let findings: string | null = null
 	if (h.config.mode === 'on' && routed?.delegate && delegate) {
 		h.status(ctx, 'jev: delegating project investigation…')
@@ -366,7 +395,7 @@ export async function onBeforeAgentStart(
 	if (fetched?.message && ctx.hasUI) ctx.ui.notify(`jev ${fetched.note}`, 'info')
 	h.status(ctx, notes[0] ? `jev ${notes.join('; ')}` : `jev-harness ${h.config.mode}`)
 	if (h.config.mode !== 'on') return undefined
-	const routeNote = delegate && routed ? `Jev route suggestion: ${routed.note}` : undefined
+	const routeNote = routed && !routed.hidden ? `Jev route suggestion: ${routed.note}` : undefined
 	const context = [routeNote, fetched?.message]
 	if (findings) {
 		context.push(
@@ -374,12 +403,15 @@ export async function onBeforeAgentStart(
 		)
 	}
 	const message = context.filter(Boolean).join('\n\n')
-	const systemPrompt =
-		routed && !delegate
-			? `${event.systemPrompt}\n\njev-harness routed this turn: ${routed.note}. Tools not listed are hidden for this turn; say so if you need one.`
-			: undefined
+	const systemPrompt = routed?.hidden ? appendRouteNote(event.systemPrompt, routed.note) : undefined
 	return {
 		...(systemPrompt ? { systemPrompt } : {}),
 		...(message ? { message: { customType: 'jev-harness', content: message, display: false } } : {})
 	}
+}
+
+function appendRouteNote(prompt: string, note: string): string
+function appendRouteNote(prompt: string | string[], note: string): string | string[] {
+	const guidance = `jev-harness routed this turn: ${note}. Tools not listed are hidden for this turn; say so if you need one.`
+	return Array.isArray(prompt) ? [...prompt, guidance] : `${prompt}\n\n${guidance}`
 }
