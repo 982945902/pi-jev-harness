@@ -17,6 +17,7 @@ import type { ExtensionAPI as OmpExtensionAPI } from '@oh-my-pi/pi-coding-agent'
 
 import { registerDelegate, type RoutedDelegate } from './delegate.ts'
 import { ask } from './jev.ts'
+import { registerReadMany } from './read-many.ts'
 import { onBeforeAgentStart } from './route.ts'
 import { onToolCall, onToolResult } from './tools.ts'
 import { active, type Config, type Harness, type Stats } from './types.ts'
@@ -137,11 +138,10 @@ export default function (pi: ExtensionAPI) {
 	const h = createHarness()
 
 	const delegateModel = process.env.PI_JEV_DELEGATE_MODEL?.trim() || h.config.delegateModel
-	let delegate: RoutedDelegate | undefined
-	if (delegateModel && 'pi' in pi && 'zod' in pi) {
-		// SAFETY: omp supplies the host SDK and schema builder; Pi does not expose these members.
-		delegate = registerDelegate(pi as typeof pi & OmpExtensionAPI, h, delegateModel)
-	}
+	// SAFETY: omp supplies the host SDK and schema builder; Pi does not expose these members.
+	const omp = 'pi' in pi && 'zod' in pi ? (pi as typeof pi & OmpExtensionAPI) : undefined
+	const delegate: RoutedDelegate | undefined =
+		delegateModel && omp ? registerDelegate(omp, h, delegateModel) : undefined
 
 	pi.on('session_start', (_event, ctx) => {
 		Object.assign(h.config, loadConfig())
@@ -158,6 +158,7 @@ export default function (pi: ExtensionAPI) {
 	})
 
 	pi.on('tool_call', (event, ctx) => onToolCall(h, event, ctx))
+	if (omp) registerReadMany(omp, () => h.config.mode === 'on')
 
 	pi.on('tool_result', (event, ctx) => onToolResult(h, event, ctx))
 
