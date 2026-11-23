@@ -21,6 +21,20 @@ export type AskOptions = {
 	timeoutMs?: number | undefined
 	signal?: AbortSignal | undefined
 	apiKey?: string | undefined
+	baseUrl?: string | undefined
+	model?: string | undefined
+}
+
+export function resolveJevApiKey(
+	options: Pick<AskOptions, 'apiKey' | 'baseUrl'>
+): string | undefined {
+	return (
+		options.apiKey ??
+		process.env.TYPESAFE_API_KEY ??
+		(options.baseUrl === 'https://openrouter.ai/api/v1/systemone'
+			? process.env.OPENROUTER_API_KEY
+			: undefined)
+	)
 }
 
 export async function ask(
@@ -28,17 +42,17 @@ export async function ask(
 	questions: Record<string, Question>,
 	options: AskOptions = {}
 ): Promise<Result> {
-	const apiKey = options.apiKey ?? process.env.TYPESAFE_API_KEY
-	if (!apiKey) throw new Error('TYPESAFE_API_KEY is not set')
+	const apiKey = resolveJevApiKey(options)
+	if (!apiKey) throw new Error('Set apiKey in jev-harness.json or set TYPESAFE_API_KEY')
 	const started = performance.now()
 	const controller = new AbortController()
 	const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 3000)
 	options.signal?.addEventListener('abort', () => controller.abort(), { once: true })
 	try {
-		const response = await fetch('https://api.typesafe.ai/v1/systemone', {
+		const response = await fetch(options.baseUrl ?? 'https://api.typesafe.ai/v1/systemone', {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ model: 'jev-latest', state, questions }),
+			body: JSON.stringify({ model: options.model ?? 'jev-latest', state, questions }),
 			signal: controller.signal
 		})
 		if (!response.ok) {

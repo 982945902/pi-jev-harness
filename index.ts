@@ -111,6 +111,9 @@ function createHarness(): Harness {
 			try {
 				const result = await ask(state, questions, {
 					timeoutMs: config.timeoutMs,
+					apiKey: config.apiKey,
+					baseUrl: config.baseUrl,
+					model: config.model,
 					signal: ctx.signal
 				})
 				stats.jevCalls++

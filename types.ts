@@ -1,6 +1,6 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
 
-import type { Question, Result } from './jev.ts'
+import { resolveJevApiKey, type Question, type Result } from './jev.ts'
 
 export type Mode = 'on' | 'log' | 'off' // log = ask Jev and record, change nothing
 
@@ -17,6 +17,9 @@ export type Config = {
 	keepHeadChars: number
 	timeoutMs: number
 	showStatus: boolean
+	apiKey?: string
+	baseUrl?: string
+	model?: string
 }
 
 export type Stats = {
@@ -64,7 +67,7 @@ export const THRESHOLD_ALWAYS_KEEP = ['read'] // never hide these, whatever Jev 
 export const READ_TOOLS = ['read', 'grep', 'find', 'ls']
 
 export const active = (h: Harness): boolean =>
-	h.config.mode !== 'off' && !!process.env.TYPESAFE_API_KEY
+	h.config.mode !== 'off' && !!resolveJevApiKey(h.config)
 
 export const short = (value: unknown, max = 300): string => {
 	const text = typeof value === 'string' ? value : JSON.stringify(value)

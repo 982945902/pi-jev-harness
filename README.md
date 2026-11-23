@@ -66,6 +66,11 @@ Optional `~/.pi/agent/jev-harness.json`:
 }
 ```
 
+For a System One gateway, set `baseUrl` to its full System One endpoint and
+`model` to the gateway's model ID. Set `apiKey` in the same file when the gateway
+requires its own bearer key. With no gateway configured, the extension uses
+TypeSafe and `TYPESAFE_API_KEY`.
+
 Set `route` to `true` only if you accept its cache tradeoff. Thresholds live in `jev.ts` next to the questions: tool kept at 0.35, file pre-fetched at 0.6, result dropped below 0.3 relevance, stuck at 0.7, secrets at 0.7.
 
 ## Files
