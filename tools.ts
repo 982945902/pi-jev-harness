@@ -118,6 +118,8 @@ export async function onToolCall(
 export async function onToolResult(h: Harness, event: ToolResultEvent, ctx: ExtensionContext) {
 	try {
 		if (!active(h) || !h.config.trim || event.isError) return undefined
+		// The trial proxy needs the original bytes for acp_retrieve.
+		if (process.env.BILI_JEV_CCR === '1' && ctx.model?.api === 'openai-completions') return undefined
 		// Clean file reads are what the model asked for; only long command, search and listing output gets judged.
 		if (!['bash', 'grep', 'find', 'ls'].includes(event.toolName)) return undefined
 		const full = resultText(event)
