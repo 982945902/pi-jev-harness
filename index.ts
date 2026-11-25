@@ -167,7 +167,8 @@ export default function (pi: ExtensionAPI) {
 		delegateModel && omp ? registerDelegate(omp, h, delegateModel) : undefined
 	if (omp) {
 		registerToolDiscovery(omp, h)
-		registerExecutor(omp, h, process.env.PI_JEV_EXECUTOR_MODEL?.trim() || '@smol')
+		const executorModel = process.env.PI_JEV_EXECUTOR_MODEL?.trim() || h.config.executorModel || '@smol'
+		registerExecutor(omp, h, executorModel)
 	}
 
 	pi.on('session_start', (_event, ctx) => {

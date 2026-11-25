@@ -70,16 +70,21 @@ entire `code` of a JavaScript `eval` call:
 jev_execute({"goal":"Find the active version and last completed rollout for this deployment URL.","tools":["mcp__browseros_neo_run"]})
 ```
 
-The `@smol` agent runs the lookup over the existing session tool bridge. It can
+The executor defaults to `@smol` and runs over the existing session tool bridge. It can
 ask Jev to choose among two to five concrete next steps using a scope summary
 and the evidence it has gathered. When Jev is unavailable or uncertain, the
 agent receives an undecided result and can verify the state or return a blocker.
 The result includes the worker's elapsed time and timings for its bridged calls.
 
-Use `PI_JEV_EXECUTOR_MODEL` to select a different fast model. The executor accepts
+Set `executorModel` to an exact `provider/model` in Jev Harness config, or use
+`PI_JEV_EXECUTOR_MODEL` for a per-run override. The executor accepts
 file lookup tools, MCP tools advertised as read-only, and BrowserOS Neo `run`
 for read-only browser work. Give the agent the URLs, allowed actions, and
 completion condition. Keep BrowserOS session handles across calls when required.
+
+When inputs are already prepared, pass `calls` with an `id`, tool `name`, and
+`args` for each. The worker invokes the supplied arguments by ID and can batch
+independent calls. This keeps long query scripts out of its tool arguments.
 
 ### Read multiple paths in one omp eval call
 

@@ -24,6 +24,7 @@ export type Config = {
 	baseUrl?: string
 	model?: string
 	delegateModel?: string
+	executorModel?: string
 }
 
 export type Stats = {
