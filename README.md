@@ -61,6 +61,26 @@ PI_JEV_DELEGATE_MODEL=magpie/group/jev-delegate omp --no-extensions -e ./index.t
   'Use jev_delegate to find how route.ts decides which tools to keep.'
 ```
 
+### Execute a multi-step lookup in omp
+
+With Jev Harness in `on` mode, pass a scoped goal and active tool names as the
+entire `code` of a JavaScript `eval` call:
+
+```text
+jev_execute({"goal":"Find the active version and last completed rollout for this deployment URL.","tools":["mcp__browseros_neo_run"]})
+```
+
+The `@smol` agent runs the lookup over the existing session tool bridge. It can
+ask Jev to choose among two to five concrete next steps using a scope summary
+and the evidence it has gathered. When Jev is unavailable or uncertain, the
+agent receives an undecided result and can verify the state or return a blocker.
+The result includes the worker's elapsed time and timings for its bridged calls.
+
+Use `PI_JEV_EXECUTOR_MODEL` to select a different fast model. The executor accepts
+file lookup tools, MCP tools advertised as read-only, and BrowserOS Neo `run`
+for read-only browser work. Give the agent the URLs, allowed actions, and
+completion condition. Keep BrowserOS session handles across calls when required.
+
 ### Read multiple paths in one omp eval call
 
 With Jev Harness in `on` mode, pass this as the entire `code` of a JavaScript

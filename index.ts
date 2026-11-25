@@ -17,6 +17,7 @@ import type { ExtensionAPI as OmpExtensionAPI } from '@oh-my-pi/pi-coding-agent'
 
 import { registerDelegate, type RoutedDelegate } from './delegate.ts'
 import { registerToolDiscovery } from './discover.ts'
+import { registerExecutor } from './execute.ts'
 import { ask } from './jev.ts'
 import { registerReadMany } from './read-many.ts'
 import { onBeforeAgentStart } from './route.ts'
@@ -164,7 +165,10 @@ export default function (pi: ExtensionAPI) {
 	const omp = 'pi' in pi && 'zod' in pi ? (pi as typeof pi & OmpExtensionAPI) : undefined
 	const delegate: RoutedDelegate | undefined =
 		delegateModel && omp ? registerDelegate(omp, h, delegateModel) : undefined
-	if (omp) registerToolDiscovery(omp, h)
+	if (omp) {
+		registerToolDiscovery(omp, h)
+		registerExecutor(omp, h, process.env.PI_JEV_EXECUTOR_MODEL?.trim() || '@smol')
+	}
 
 	pi.on('session_start', (_event, ctx) => {
 		Object.assign(h.config, loadConfig())
