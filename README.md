@@ -86,6 +86,20 @@ When inputs are already prepared, pass `calls` with an `id`, tool `name`, and
 `args` for each. The worker invokes the supplied arguments by ID and can batch
 independent calls. This keeps long query scripts out of its tool arguments.
 
+### Choose a click from each Neo observation
+
+Pass `jev_follow({"goal":"...","url":"https://...","observe":"...","maxClicks":4})`
+as the entire JavaScript `eval` code. Provide a read-only Neo script body that
+uses `page` and, after a click, `previous` (the prior local evidence). Return
+`{state, evidence, candidates: [{ref, label}]}` with one to four permitted
+navigation refs from the current snapshot, or `{state, evidence, done: true}`
+when the completion condition is met. Keep `state` and labels short and free of
+credentials. Only these descriptions are sent to Jev for choosing a click.
+
+The workflow opens its own tab and reuses the Neo session. Each nonterminal
+observation goes to Jev, and its selection drives one click in the next Neo
+call. If Jev abstains, the workflow returns the evidence collected so far.
+
 ### Read multiple paths in one omp eval call
 
 With Jev Harness in `on` mode, pass this as the entire `code` of a JavaScript

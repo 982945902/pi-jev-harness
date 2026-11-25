@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent'
 
+import { followCode, NEO_RUN } from './follow.ts'
 import { choice } from './jev.ts'
 import { active, short, type Harness } from './types.ts'
 
 const JUDGE_TOOL = 'jev_judge_step'
 const LABEL_PREFIX = 'jevexec-'
 const MIN_CONFIDENCE = 0.65
-const READ_TOOLS = { read: true, grep: true, glob: true, find: true, ls: true, mcp__browseros_neo_run: true }
+const READ_TOOLS = { read: true, grep: true, glob: true, find: true, ls: true, [NEO_RUN]: true }
 
 type PreparedCall = { id: string; name: string; args: Record<string, unknown> }
 
@@ -16,6 +17,7 @@ const GUIDANCE = [
 	'Call eval with language js and the entire code set to jev_execute({"goal":"objective, scope and completion condition","tools":["active_tool_name"]}). Use JSON inside the parentheses.',
 	'The executor runs a fast model over the specified session tools and can ask Jev to choose among candidate next steps. Include relevant tool inputs and access constraints in the goal.',
 	'When exact tool arguments are already available, supply calls: [{"id":"lookup","name":"active_tool_name","args":{}}] so the worker can invoke them by ID.',
+	'When each fresh Neo observation must determine the next click, use jev_follow({"goal":"...","url":"...","observe":"read-only Neo script body","maxClicks":4}) as the entire JS eval code. The observe body gets page and previous evidence and returns {state, evidence, candidates:[{ref,label}]} or {state, evidence, done:true}.',
 	'For a direct lookup or a known single tool call, call that tool directly.'
 ].join('\n')
 
@@ -114,6 +116,12 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 			args: z.record(z.string(), z.unknown())
 		})).max(8).optional()
 	})
+	const followSchema = z.object({
+		goal: z.string().trim().min(1).max(600),
+		url: z.string().url().regex(/^https?:\/\//i),
+		observe: z.string().trim().min(1).max(16_000),
+		maxClicks: z.number().int().min(1).max(8).default(4)
+	})
 	pi.registerTool({
 		name: JUDGE_TOOL,
 		label: 'Jev next-step judgment',
@@ -123,7 +131,7 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 		parameters: z.object({
 			goal: z.string().min(1).max(16_000),
 			state: z.string().trim().min(1).max(1600),
-			candidates: z.array(z.string().trim().min(1).max(240)).min(2).max(5)
+			candidates: z.array(z.string().trim().min(1).max(240)).min(1).max(5)
 		}),
 		async execute(_id, { goal, state, candidates }, signal, _onUpdate, ctx) {
 			if (!available()) throw new Error('Jev next-step judgment requires an active Jev client.')
@@ -146,7 +154,7 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 			const decision = index >= 0 && answer?.type === 'choice' && answer.confidence >= MIN_CONFIDENCE
 				? { status: 'chosen', index: index + 1, candidate: candidates[index], confidence: answer.confidence }
 				: { status: 'undecided' }
-			return { content: [{ type: 'text', text: JSON.stringify(decision) }] }
+			return { content: [{ type: 'text', text: JSON.stringify(decision) }], details: { decision } }
 		}
 	})
 
@@ -164,14 +172,21 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 	})
 	pi.on('tool_call', ({ toolName, input }) => {
 		if (toolName !== 'eval' || input.language !== 'js' || typeof input.code !== 'string') return
-		const raw = /^\s*jev_execute\s*\(([\s\S]*)\)\s*;?\s*$/.exec(input.code)?.[1]
-		if (raw === undefined) return
+		const match = /^\s*(jev_execute|jev_follow)\s*\(([\s\S]*)\)\s*;?\s*$/.exec(input.code)
+		if (!match) return
+		const [, entry, raw = ''] = match
 		if (!available()) return { block: true, reason: 'Jev executor requires an active Jev client.' }
 		let args: unknown
 		try {
 			args = JSON.parse(raw)
 		} catch {
-			return { block: true, reason: 'jev_execute expects a JSON object with goal and tools.' }
+			return { block: true, reason: `${entry} expects a JSON object.` }
+		}
+		if (entry === 'jev_follow') {
+			const parsed = followSchema.safeParse(args)
+			if (!parsed.success) return { block: true, reason: 'jev_follow requires a goal, HTTP(S) URL, and read-only observe script.' }
+			if (!pi.getActiveTools().includes(NEO_RUN)) return { block: true, reason: 'BrowserOS Neo run is unavailable.' }
+			return { input: { timeout: 120, ...input, code: followCode(parsed.data, JUDGE_TOOL) } }
 		}
 		const parsed = inputSchema.safeParse(args)
 		if (!parsed.success) return { block: true, reason: 'jev_execute requires a goal and 1–8 tool names.' }
