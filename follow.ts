@@ -7,7 +7,10 @@ export type FollowInput = {
 	maxClicks: number
 }
 
-export function followCode({ goal, url, observe, maxClicks }: FollowInput, judgeTool: string): string {
+export function followCode(
+	{ goal, url, observe, maxClicks }: FollowInput,
+	judgeTool: string
+): string {
 	return `{
 	const goal = ${JSON.stringify(goal)};
 	const url = ${JSON.stringify(url)};

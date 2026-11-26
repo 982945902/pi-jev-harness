@@ -6,8 +6,11 @@ import { choice } from './jev.ts'
 import { active, short, type Harness } from './types.ts'
 
 const JUDGE_TOOL = 'jev_judge_step'
+
 const LABEL_PREFIX = 'jevexec-'
+
 const MIN_CONFIDENCE = 0.65
+
 const READ_TOOLS = { read: true, grep: true, glob: true, find: true, ls: true, [NEO_RUN]: true }
 
 type PreparedCall = { id: string; name: string; args: Record<string, unknown> }
@@ -21,7 +24,12 @@ const GUIDANCE = [
 	'For a direct lookup or a known single tool call, call that tool directly.'
 ].join('\n')
 
-function executorCode(goal: string, tools: Record<string, string>, calls: PreparedCall[], label: string): string {
+function executorCode(
+	goal: string,
+	tools: Record<string, string>,
+	calls: PreparedCall[],
+	label: string
+): string {
 	return `{
 	const goal = ${JSON.stringify(goal)};
 	const allowed = ${JSON.stringify(tools)};
@@ -110,22 +118,31 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 	const inputSchema = z.object({
 		goal: z.string().trim().min(1).max(16_000),
 		tools: z.array(z.string().trim().min(1).max(160)).min(1).max(8),
-		calls: z.array(z.object({
-			id: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,59}$/),
-			name: z.string(),
-			args: z.record(z.string(), z.unknown())
-		})).max(8).optional()
+		calls: z
+			.array(
+				z.object({
+					id: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,59}$/),
+					name: z.string(),
+					args: z.record(z.string(), z.unknown())
+				})
+			)
+			.max(8)
+			.optional()
 	})
 	const followSchema = z.object({
 		goal: z.string().trim().min(1).max(600),
-		url: z.string().url().regex(/^https?:\/\//i),
+		url: z
+			.string()
+			.url()
+			.regex(/^https?:\/\//i),
 		observe: z.string().trim().min(1).max(16_000),
 		maxClicks: z.number().int().min(1).max(8).default(4)
 	})
 	pi.registerTool({
 		name: JUDGE_TOOL,
 		label: 'Jev next-step judgment',
-		description: 'Choose among a small set of concrete next steps using summarized execution evidence.',
+		description:
+			'Choose among a small set of concrete next steps using summarized execution evidence.',
 		approval: 'read',
 		loadMode: 'essential',
 		parameters: z.object({
@@ -135,6 +152,7 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 		}),
 		async execute(_id, { goal, state, candidates }, signal, _onUpdate, ctx) {
 			if (!available()) throw new Error('Jev next-step judgment requires an active Jev client.')
+			// SAFETY: The tool schema validates every candidate as a string before execution.
 			const keys = (candidates as string[]).map((_, index) => `option_${index + 1}`)
 			const criteria = Object.fromEntries(keys.map((key, index) => [key, candidates[index]]))
 			const result = await h.jev(
@@ -151,9 +169,15 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 			)
 			const answer = result?.answers.next
 			const index = answer?.type === 'choice' ? keys.indexOf(answer.choice) : -1
-			const decision = index >= 0 && answer?.type === 'choice' && answer.confidence >= MIN_CONFIDENCE
-				? { status: 'chosen', index: index + 1, candidate: candidates[index], confidence: answer.confidence }
-				: { status: 'undecided' }
+			const decision =
+				index >= 0 && answer?.type === 'choice' && answer.confidence >= MIN_CONFIDENCE
+					? {
+							status: 'chosen',
+							index: index + 1,
+							candidate: candidates[index],
+							confidence: answer.confidence
+						}
+					: { status: 'undecided' }
 			return { content: [{ type: 'text', text: JSON.stringify(decision) }], details: { decision } }
 		}
 	})
@@ -164,7 +188,8 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 		}
 	})
 	pi.on('before_subagent_spawn', ({ agent, invocationKind, spawnKey }, ctx) => {
-		if (invocationKind !== 'eval' || agent !== 'sonic' || !spawnKey?.startsWith(LABEL_PREFIX)) return
+		if (invocationKind !== 'eval' || agent !== 'sonic' || !spawnKey?.startsWith(LABEL_PREFIX))
+			return
 		if (!available() || !ctx.models.resolve(modelSpec)) {
 			return { block: true, reason: `Jev executor model is unavailable: ${modelSpec}` }
 		}
@@ -184,27 +209,43 @@ export function registerExecutor(pi: ExtensionAPI, h: Harness, modelSpec: string
 		}
 		if (entry === 'jev_follow') {
 			const parsed = followSchema.safeParse(args)
-			if (!parsed.success) return { block: true, reason: 'jev_follow requires a goal, HTTP(S) URL, and read-only observe script.' }
-			if (!pi.getActiveTools().includes(NEO_RUN)) return { block: true, reason: 'BrowserOS Neo run is unavailable.' }
+			if (!parsed.success)
+				return {
+					block: true,
+					reason: 'jev_follow requires a goal, HTTP(S) URL, and read-only observe script.'
+				}
+			if (!pi.getActiveTools().includes(NEO_RUN))
+				return { block: true, reason: 'BrowserOS Neo run is unavailable.' }
 			return { input: { timeout: 120, ...input, code: followCode(parsed.data, JUDGE_TOOL) } }
 		}
 		const parsed = inputSchema.safeParse(args)
-		if (!parsed.success) return { block: true, reason: 'jev_execute requires a goal and 1–8 tool names.' }
+		if (!parsed.success)
+			return { block: true, reason: 'jev_execute requires a goal and 1–8 tool names.' }
 		const enabled = new Set(pi.getActiveTools())
 		const info = new Map(pi.getAllTools().map((item) => [item.name, item]))
+		// SAFETY: The dictionary starts empty and is populated only with string descriptions below.
 		const tools = Object.create(null) as Record<string, string>
 		for (const name of parsed.data.tools) {
 			const item = info.get(name)
-			if (!item || !enabled.has(name) || !(Object.hasOwn(READ_TOOLS, name) || item.mcpReadOnlyHint)) {
+			if (
+				!item ||
+				!enabled.has(name) ||
+				!(Object.hasOwn(READ_TOOLS, name) || item.mcpReadOnlyHint)
+			) {
 				return { block: true, reason: `Tool unavailable for read-only Jev execution: ${name}` }
 			}
 			tools[name] = short(item.description, 1000)
 		}
 		const calls: PreparedCall[] = parsed.data.calls ?? []
-		if (new Set(calls.map((call) => call.id)).size !== calls.length || calls.some((call) => !Object.hasOwn(tools, call.name))) {
+		if (
+			new Set(calls.map((call) => call.id)).size !== calls.length ||
+			calls.some((call) => !Object.hasOwn(tools, call.name))
+		) {
 			return { block: true, reason: 'Prepared calls must have unique IDs and use declared tools.' }
 		}
 		const label = LABEL_PREFIX + randomUUID().slice(0, 8)
-		return { input: { timeout: 120, ...input, code: executorCode(parsed.data.goal, tools, calls, label) } }
+		return {
+			input: { timeout: 120, ...input, code: executorCode(parsed.data.goal, tools, calls, label) }
+		}
 	})
 }
